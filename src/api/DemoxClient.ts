@@ -1,11 +1,21 @@
 import { loadConfig, logger } from "../utils/config.js";
-import cloudbase from "@cloudbase/node-sdk";
+
+/**
+ * 鉴权错误类
+ * 当 token 过期或无效时抛出此错误，触发自动重新登录
+ */
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthError";
+  }
+}
 
 /**
  * 部署参数
  */
 export interface DeployParams {
-  zipFile: string; // base64 编码的 ZIP 文件内容或文件路径
+  zipFile: string;
   websiteId?: string;
   fileName: string;
 }
@@ -44,7 +54,9 @@ export class DemoxClient {
   }
 
   /**
-   * 调用云函数（通过 mcp-api HTTP 代理）
+   * 调用云函数
+   *
+   * 使用 mcp-api 代理模式：需要 { functionName, data } 包装
    */
   private async callFunction(
     name: string,
@@ -53,9 +65,17 @@ export class DemoxClient {
   ): Promise<any> {
     try {
       logger.debug(`调用云函数: ${name}`);
-
-      // 使用配置的云函数 URL
       logger.debug(`API URL: ${this.cloudFunctionUrl}`);
+
+      // 使用 mcp-api 代理模式，将 accessToken 添加到 data 中
+      const requestBody = {
+        functionName: name,
+        data: {
+          ...data,
+          accessToken, // 云函数需要从 data 中获取 accessToken
+        },
+      };
+      logger.debug('使用代理调用模式');
 
       const response = await fetch(this.cloudFunctionUrl, {
         method: 'POST',
@@ -63,14 +83,22 @@ export class DemoxClient {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({
-          functionName: name,
-          data,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
         const errorText = await response.text();
+
+        // 检查是否是鉴权错误
+        if (response.status === 401 ||
+            errorText.includes("UNAUTHORIZED") ||
+            errorText.includes("TOKEN_INVALID") ||
+            errorText.includes("AUTH_REQUIRED") ||
+            errorText.includes("INVALID_CREDENTIALS")) {
+          logger.error("鉴权失败，需要重新登录");
+          throw new AuthError("Token 已过期或无效，需要重新登录");
+        }
+
         throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
 
@@ -79,6 +107,23 @@ export class DemoxClient {
       // 检查错误
       if (responseData && responseData.error) {
         const error = responseData.error;
+
+        // 检查是否是鉴权相关的错误代码
+        const authErrorCodes = [
+          "TOKEN_INVALID",
+          "AUTH_REQUIRED",
+          "AUTH_ERROR",
+          "UNAUTHORIZED",
+          "TOKEN_EXPIRED",
+          "NEED_LOGIN",
+          "INVALID_CREDENTIALS",
+        ];
+
+        if (authErrorCodes.includes(error.code)) {
+          logger.error(`鉴权错误 [${error.code}]: ${error.message}`);
+          throw new AuthError(error.message || "Token 已过期或无效");
+        }
+
         throw new Error(
           `[${error.code}] ${error.message}${error.suggestion ? `\n建议：${error.suggestion}` : ""
           }`
@@ -87,6 +132,11 @@ export class DemoxClient {
 
       return responseData;
     } catch (error: any) {
+      // 如果已经是 AuthError，直接抛出
+      if (error instanceof AuthError) {
+        throw error;
+      }
+
       logger.error(`云函数调用失败 (${name}):`, error.message);
       throw error;
     }
@@ -99,7 +149,28 @@ export class DemoxClient {
     params: DeployParams,
     accessToken: string
   ): Promise<DeployResult> {
+    // 如果没有提供 websiteId，生成一个新的
+    let websiteId = params.websiteId;
+    if (!websiteId) {
+      websiteId = this.generateWebsiteId();
+      logger.debug(`自动生成 websiteId: ${websiteId}`);
+    }
+
     logger.info(`正在部署网站: ${params.fileName}`);
+
+    // 从 token 中解析用户 ID（假设 accessToken 是 JWT）
+    let userId = 'unknown';
+    try {
+      // JWT 格式: header.payload.signature
+      const payload = accessToken.split('.')[1];
+      if (payload) {
+        const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
+        userId = decoded.uid || decoded.user_id || decoded.userId || decoded.sub || 'unknown';
+        logger.debug(`从 token 解析出用户 ID: ${userId}`);
+      }
+    } catch (error) {
+      logger.warn('无法从 token 解析用户 ID，将使用默认值');
+    }
 
     // 处理输入路径（文件、目录或 URL），统一转换为本地 ZIP 文件
     let localFilePath: string | null = null;
@@ -147,20 +218,18 @@ export class DemoxClient {
       throw new Error(`文件过大 (${(fileSize / 1024 / 1024).toFixed(2)}MB)，当前最大支持 500MB`);
     }
 
-    // 一律使用 CloudBase Storage 上传
-    logger.info("正在上传文件到 CloudBase Storage...");
+    logger.info("正在部署网站...");
 
-    const fileId = await this.uploadToCloudBaseStorage(
-      localFilePath,
-      accessToken
-    );
+    // 使用云存储上传方式
+    logger.info(`文件大小: ${(fileSize / 1024 / 1024).toFixed(2)}MB，上传到云存储`);
+    const uploadResult = await this.uploadToCloudStorage(localFilePath, accessToken);
 
     const result = await this.callFunction(
       "deploy-website",
       {
         action: "upload_and_deploy",
-        fileId,
-        websiteId: params.websiteId,
+        fileId: uploadResult.fileId,
+        websiteId,
         fileName: params.fileName,
       },
       accessToken
@@ -168,6 +237,18 @@ export class DemoxClient {
 
     logger.info(`网站部署成功: ${result.url}`);
     return result;
+  }
+
+  /**
+   * 生成 8 位由大写字母与数字组成的随机 websiteId
+   */
+  private generateWebsiteId(): string {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let out = "";
+    for (let i = 0; i < 8; i++) {
+      out += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return out;
   }
 
   /**
@@ -242,49 +323,114 @@ export class DemoxClient {
   }
 
   /**
-   * 上传文件到 CloudBase Storage
+   * 上传文件到云存储
+   * 使用云函数获取上传凭证，然后直接上传到主存储桶
    */
-  private async uploadToCloudBaseStorage(
+  private async uploadToCloudStorage(
     filePath: string,
     accessToken: string
-  ): Promise<string> {
-    const config = loadConfig();
+  ): Promise<{ fileId: string; objectId: string }> {
+    const fs = await import("fs");
+    const pathModule = await import("path");
+    const https = await import("https");
+    const urlModule = await import("url");
 
-    try {
-      const fs = await import("fs");
-      const pathModule = await import("path");
+    const fileName = pathModule.basename(filePath);
+    const fileSize = fs.statSync(filePath).size;
 
-      const fileName = pathModule.basename(filePath);
-      const cloudPath = `mcp-uploads/${Date.now()}-${fileName}`;
+    logger.info(`准备上传文件: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
 
-      logger.info(`正在上传文件到 CloudBase Storage: ${cloudPath}`);
+    // 构建云端路径
+    const cloudPath = `demox-deploy/${Date.now()}-${fileName}`;
 
-      // 初始化 CloudBase
-      const app = cloudbase.init({
-        env: config.serverEnv,
-        accessToken,
-      });
+    logger.debug(`调用云函数获取上传凭证: ${cloudPath}`);
 
-      // 使用 Stream 上传（避免内存溢出）
-      const fileStream = fs.createReadStream(filePath);
+    // 调用云函数获取上传凭证
+    const uploadInfo = await this.callFunction(
+      "deploy-website",
+      {
+        action: "get_upload_url",
+        cloudPath,
+      },
+      accessToken
+    );
 
-      return new Promise((resolve, reject) => {
-        app.uploadFile({
-          cloudPath,
-          fileContent: fileStream,
-        }).then((result: any) => {
-          logger.info(`文件上传成功: ${result.fileID}`);
-          resolve(result.fileID);
-        }).catch((error: any) => {
-          logger.error("上传文件到 CloudBase Storage 失败:", error.message);
-          reject(new Error(`上传文件失败: ${error.message}`));
-        });
-      });
-    } catch (error: any) {
-      logger.error("上传文件到 CloudBase Storage 失败:", error.message);
-      logger.error("错误详情:", error);
-      throw new Error(`上传文件失败: ${error.message}`);
+    if (!uploadInfo.uploadUrl || !uploadInfo.fileId) {
+      throw new Error("获取上传凭证失败");
     }
+
+    logger.info(`上传凭证获取成功`);
+    logger.debug(`上传 URL: ${uploadInfo.uploadUrl}`);
+    logger.debug(`文件 ID: ${uploadInfo.fileId}`);
+
+    // 读取文件内容
+    const fileBuffer = fs.readFileSync(filePath);
+
+    // 解析上传 URL
+    const uploadUrl = new urlModule.URL(uploadInfo.uploadUrl);
+
+    logger.info(`开始上传到 COS: ${uploadUrl.hostname}${uploadUrl.pathname}`);
+
+    // 上传文件到 COS
+    const uploadResult = await new Promise<{
+      statusCode: number;
+      headers: any;
+      body: string;
+    }>((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: uploadUrl.hostname,
+          port: 443,
+          path: uploadUrl.pathname + uploadUrl.search,
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/zip",
+            "Content-Length": fileBuffer.length,
+          },
+        },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk) => {
+            body += chunk;
+          });
+          res.on("end", () => {
+            resolve({
+              statusCode: res.statusCode || 0,
+              headers: res.headers,
+              body,
+            });
+          });
+        }
+      );
+
+      req.on("error", (err) => {
+        logger.error("上传请求错误:", err);
+        reject(err);
+      });
+
+      req.write(fileBuffer);
+      req.end();
+    });
+
+    logger.debug(`上传响应状态码: ${uploadResult.statusCode}`);
+    if (uploadResult.body) {
+      logger.debug(`上传响应内容: ${uploadResult.body.substring(0, 500)}`);
+    }
+
+    // COS 上传成功返回 200
+    if (uploadResult.statusCode !== 200) {
+      logger.error(`上传失败，状态码: ${uploadResult.statusCode}`);
+      logger.error(`响应内容: ${uploadResult.body}`);
+      throw new Error(`文件上传失败: HTTP ${uploadResult.statusCode} - ${uploadResult.body}`);
+    }
+
+    logger.info(`文件上传成功到主存储桶`);
+    logger.info(`文件 ID: ${uploadInfo.fileId}`);
+
+    return {
+      fileId: uploadInfo.fileId,
+      objectId: uploadInfo.objectId || cloudPath,
+    };
   }
 
   /**

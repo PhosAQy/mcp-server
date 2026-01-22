@@ -16,7 +16,7 @@ export interface MCPConfig {
 export function loadConfig(): MCPConfig {
   const clientId = process.env.DEMOX_CLIENT_ID || "demox-mcp-client";
   const authUrl =
-    process.env.DEMOX_AUTH_URL || "http://localhost:8080/#/mcp-authorize";
+    process.env.DEMOX_AUTH_URL || "http://demox.site/#/mcp-authorize";
   const apiBase = process.env.DEMOX_API_BASE || "https://demox.site";
   const serverEnv = process.env.DEMOX_SERVER_ENV || "moyu-3g5pbxld00f4aead";
   const cloudFunctionUrl =

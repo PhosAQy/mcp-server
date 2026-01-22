@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { OAuthManager } from "./auth/OAuthManager.js";
-import { DemoxClient } from "./api/DemoxClient.js";
+import { DemoxClient, AuthError } from "./api/DemoxClient.js";
 import { logger } from "./utils/config.js";
 
 /**
@@ -30,7 +30,7 @@ class DemoxMCPServer {
     this.server = new Server(
       {
         name: "@demox/mcp-server",
-        version: "1.0.0",
+        version: "1.0.11",
       },
       {
         capabilities: {
@@ -149,8 +149,9 @@ class DemoxMCPServer {
       } catch (error: any) {
         logger.error(`工具调用失败 (${name}):`, error.message);
 
-        // 检查是否是认证错误
-        const isAuthError = error.message.includes("Token") ||
+        // 检查是否是 AuthError 实例或包含认证相关的错误信息
+        const isAuthError = error.name === "AuthError" ||
+                            error.message.includes("Token") ||
                             error.message.includes("认证") ||
                             error.message.includes("登录") ||
                             error.message.includes("UNAUTHORIZED") ||

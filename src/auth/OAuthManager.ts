@@ -229,6 +229,7 @@ export class OAuthManager {
   private async loadToken(): Promise<TokenData | null> {
     try {
       if (!existsSync(this.tokenPath)) {
+        logger.debug("Token 文件不存在");
         return null;
       }
 
@@ -236,6 +237,16 @@ export class OAuthManager {
       const tokenData = JSON.parse(content);
 
       logger.debug("成功加载本地 Token");
+      logger.debug(`Token 文件路径: ${this.tokenPath}`);
+      logger.debug(`AccessToken 长度: ${tokenData.accessToken?.length || 0}`);
+      logger.debug(`ExpiresAt: ${tokenData.expiresAt ? new Date(tokenData.expiresAt).toISOString() : '未设置'}`);
+
+      // 验证 token 完整性
+      if (!tokenData.accessToken) {
+        logger.error("Token 数据缺少 accessToken 字段");
+        return null;
+      }
+
       return tokenData;
     } catch (error) {
       logger.error("加载本地 Token 失败:", error);
