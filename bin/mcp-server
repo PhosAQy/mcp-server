@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+/**
+ * Demox MCP Server 入口点
+ *
+ * 作为 MCP Server 运行，通过 stdio 与 MCP 客户端通信
+ */
+
+require("../dist/index.js");
