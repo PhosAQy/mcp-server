@@ -1,6 +1,6 @@
 {
   "name": "@demox-site/mcp-server",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Demox MCP Server - Deploy static websites with AI",
   "main": "./dist/index.js",
   "type": "module",

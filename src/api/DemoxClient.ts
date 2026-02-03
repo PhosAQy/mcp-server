@@ -63,6 +63,9 @@ export class DemoxClient {
     data: Record<string, any>,
     accessToken: string
   ): Promise<any> {
+    const https = await import("https");
+    const urlModule = await import("url");
+
     try {
       logger.debug(`调用云函数: ${name}`);
       logger.debug(`API URL: ${this.cloudFunctionUrl}`);
@@ -77,20 +80,63 @@ export class DemoxClient {
       };
       logger.debug('使用代理调用模式');
 
-      const response = await fetch(this.cloudFunctionUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify(requestBody),
+      const urlObj = new urlModule.URL(this.cloudFunctionUrl);
+      const requestBodyStr = JSON.stringify(requestBody);
+
+      // 使用原生 https.request 并禁用 SSL 验证
+      const responseData = await new Promise<any>((resolve, reject) => {
+        const req = https.request(
+          {
+            hostname: urlObj.hostname,
+            port: urlObj.port || 443,
+            path: urlObj.pathname + urlObj.search,
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Length": Buffer.byteLength(requestBodyStr),
+            },
+            rejectUnauthorized: false, // 禁用 SSL 证书验证
+          },
+          (res: any) => {
+            let body = "";
+            res.on("data", (chunk: any) => {
+              body += chunk;
+            });
+            res.on("end", () => {
+              try {
+                const jsonResponse = JSON.parse(body);
+                resolve({
+                  ok: res.statusCode && res.statusCode >= 200 && res.statusCode < 300,
+                  status: res.statusCode,
+                  data: jsonResponse,
+                });
+              } catch (e) {
+                resolve({
+                  ok: res.statusCode && res.statusCode >= 200 && res.statusCode < 300,
+                  status: res.statusCode,
+                  data: body,
+                });
+              }
+            });
+          }
+        );
+
+        req.on("error", (err: Error) => {
+          reject(new Error(`请求失败: ${err.message}`));
+        });
+
+        req.write(requestBodyStr);
+        req.end();
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
+      if (!responseData.ok) {
+        const errorText = typeof responseData.data === "string"
+          ? responseData.data
+          : JSON.stringify(responseData.data);
 
         // 检查是否是鉴权错误
-        if (response.status === 401 ||
+        if (responseData.status === 401 ||
             errorText.includes("UNAUTHORIZED") ||
             errorText.includes("TOKEN_INVALID") ||
             errorText.includes("AUTH_REQUIRED") ||
@@ -99,14 +145,12 @@ export class DemoxClient {
           throw new AuthError("Token 已过期或无效，需要重新登录");
         }
 
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+        throw new Error(`HTTP ${responseData.status}: ${errorText}`);
       }
 
-      const responseData = await response.json();
-
       // 检查错误
-      if (responseData && responseData.error) {
-        const error = responseData.error;
+      if (responseData.data && responseData.data.error) {
+        const error = responseData.data.error;
 
         // 检查是否是鉴权相关的错误代码
         const authErrorCodes = [
@@ -130,7 +174,7 @@ export class DemoxClient {
         );
       }
 
-      return responseData;
+      return responseData.data;
     } catch (error: any) {
       // 如果已经是 AuthError，直接抛出
       if (error instanceof AuthError) {
