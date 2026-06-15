@@ -116,7 +116,9 @@ class DemoxMCPServer {
               properties: {
                 subdomain: {
                   type: "string",
-                  description: "要检查的子域名前缀，例如 my-demo",
+                  minLength: 5,
+                  maxLength: 63,
+                  description: "要检查的子域名前缀，5-63 位，例如 my-demo",
                 },
                 websiteId: {
                   type: "string",
@@ -140,7 +142,9 @@ class DemoxMCPServer {
                 },
                 subdomain: {
                   type: "string",
-                  description: "子域名前缀，例如 my-demo，对应 my-demo.demox.site",
+                  minLength: 5,
+                  maxLength: 63,
+                  description: "子域名前缀，5-63 位，例如 my-demo，对应 my-demo.demox.site",
                 },
               },
               required: ["websiteId", "subdomain"],
