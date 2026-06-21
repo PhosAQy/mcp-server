@@ -6,9 +6,13 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createRequire } from "module";
 import { OAuthManager } from "./auth/OAuthManager.js";
 import { DemoxClient, AuthError } from "./api/DemoxClient.js";
 import { logger } from "./utils/config.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 /**
  * Demox MCP Server
@@ -30,7 +34,7 @@ class DemoxMCPServer {
     this.server = new Server(
       {
         name: "@demox/mcp-server",
-        version: "1.1.0",
+        version,
       },
       {
         capabilities: {

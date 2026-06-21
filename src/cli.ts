@@ -11,15 +11,18 @@ import { OAuthManager } from "./auth/OAuthManager.js";
 import { DemoxClient } from "./api/DemoxClient.js";
 import { existsSync } from "fs";
 import { promises as fs } from "fs";
+import { createRequire } from "module";
 import pathModule from "path";
 import { getTokenPath, logger } from "./utils/config.js";
 
 const program = new Command();
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 program
   .name("demox-mcp")
   .description("Demox MCP Server CLI 工具")
-  .version("1.1.0");
+  .version(version);
 
 /**
  * 登录命令
