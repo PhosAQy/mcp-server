@@ -23,6 +23,7 @@ export class AuthError extends Error {
 export interface DeployParams {
   zipFile: string;
   websiteId?: string;
+  projectId?: string;
   fileName: string;
   templateId?: string;
 }
@@ -33,9 +34,11 @@ export interface DeployParams {
 export interface DeployResult {
   url: string;
   websiteId: string;
+  projectId?: string | null;
   path: string;
   defaultUrl?: string;
   customUrl?: string | null;
+  subdomainDomain?: string | null;
   preferredUrl?: string;
   cachePurge?: unknown;
 }
@@ -50,6 +53,10 @@ export interface Website {
   url: string;
   path: string;
   subdomain?: string | null;
+  subdomainDomain?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  projectSlug?: string | null;
   defaultUrl?: string;
   customUrl?: string | null;
   preferredUrl?: string;
@@ -57,9 +64,18 @@ export interface Website {
   updatedAt: string;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  slug: string;
+  archived?: boolean;
+  websitesCount?: number;
+}
+
 export interface DomainCheckResult {
   success: boolean;
   available: boolean;
+  domain?: string;
   reason?: string;
   message?: string;
 }
@@ -67,6 +83,8 @@ export interface DomainCheckResult {
 export interface DomainResult {
   success: boolean;
   subdomain?: string;
+  subdomainDomain?: string;
+  subdomain_domain?: string;
   url?: string;
   message?: string;
   code?: string;
@@ -249,6 +267,10 @@ export class DemoxClient {
       const stat = await this.getPathStat(params.zipFile);
       if (stat.isDirectory) {
         // 目录：打包成 ZIP
+        const sourceProjectMessage = await this.detectSourceProjectDirectory(params.zipFile);
+        if (sourceProjectMessage) {
+          throw new Error(sourceProjectMessage);
+        }
         logger.debug(`检测到目录: ${params.zipFile}，正在打包...`);
         localFilePath = await this.zipDirectoryToFile(params.zipFile);
       } else if (params.zipFile.toLowerCase().endsWith(".zip")) {
@@ -296,6 +318,7 @@ export class DemoxClient {
         fileContentBase64,
         fileName: params.fileName,
         websiteId,
+        projectId: params.projectId,
       },
       accessToken
     );
@@ -387,6 +410,60 @@ export class DemoxClient {
     }
   }
 
+  private async detectSourceProjectDirectory(dirPath: string): Promise<string | null> {
+    const fs = await import("fs");
+    const pathModule = await import("path");
+    const exists = (name: string) => fs.existsSync(pathModule.join(dirPath, name));
+    const isDir = (name: string) => {
+      try {
+        return fs.statSync(pathModule.join(dirPath, name)).isDirectory();
+      } catch {
+        return false;
+      }
+    };
+
+    if (isDir("node_modules")) {
+      return "检测到目录里包含 node_modules。请不要上传源码项目或依赖目录，请先运行 npm run build，然后部署 dist/build/out 目录。";
+    }
+
+    const hasPackage = exists("package.json");
+    const hasLock = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"].some(exists);
+    const hasSourceDir = ["src", "app", "pages", "components"].some(isDir);
+    const hasConfig = [
+      "vite.config.js", "vite.config.ts", "vite.config.mjs",
+      "next.config.js", "next.config.mjs", "nuxt.config.ts",
+      "astro.config.mjs", "svelte.config.js", "webpack.config.js",
+      "tailwind.config.js", "postcss.config.js"
+    ].some(exists);
+
+    let packageLooksFrontend = false;
+    if (hasPackage) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pathModule.join(dirPath, "package.json"), "utf8"));
+        const deps = {
+          ...(pkg.dependencies || {}),
+          ...(pkg.devDependencies || {}),
+          ...(pkg.peerDependencies || {}),
+        };
+        packageLooksFrontend = Object.keys(deps).some((name) =>
+          /^(vite|next|nuxt|astro|svelte|react|react-dom|vue|@vitejs\/|@sveltejs\/|@astrojs\/|@angular\/|webpack|parcel|tailwindcss)$/i.test(name)
+        ) || Boolean(pkg.scripts?.build || pkg.scripts?.dev || pkg.scripts?.start);
+      } catch {
+        packageLooksFrontend = true;
+      }
+    }
+
+    if ((hasPackage && (packageLooksFrontend || hasSourceDir || hasConfig || hasLock)) || (hasConfig && hasSourceDir)) {
+      return [
+        "检测到你部署的是前端源码项目，而不是静态构建产物。",
+        "Demox 当前只托管可直接访问的静态文件。",
+        "请先在本地项目根目录运行 npm install && npm run build，",
+        "然后部署构建输出目录，例如：demox deploy ./dist 或 demox deploy ./out。",
+      ].join("\n");
+    }
+    return null;
+  }
+
   /**
    * 下载 ZIP 文件并保存为 Buffer
    */
@@ -439,16 +516,18 @@ export class DemoxClient {
     return websiteId ? `https://${websiteId.toLowerCase()}.demox.site/` : "";
   }
 
-  private buildCustomUrl(subdomain?: string | null): string | null {
+  private buildCustomUrl(subdomain?: string | null, domain?: string | null): string | null {
     const label = (subdomain || "").trim().toLowerCase();
-    return label ? `https://${label}.demox.site/` : null;
+    const suffix = (domain || "demox.site").trim().toLowerCase();
+    return label ? `https://${label}.${suffix}/` : null;
   }
 
   private mapMySQLToCamelCase(row: any): Website {
     const websiteId = row.website_id || row.websiteId || "";
     const subdomain = row.subdomain || null;
+    const subdomainDomain = row.subdomainDomain || row.subdomain_domain || "demox.site";
     const defaultUrl = row.defaultUrl || row.default_url || this.buildDefaultUrl(websiteId);
-    const customUrl = row.customUrl || row.custom_url || this.buildCustomUrl(subdomain);
+    const customUrl = row.customUrl || row.custom_url || this.buildCustomUrl(subdomain, subdomainDomain);
     const preferredUrl = row.preferredUrl || row.preferred_url || customUrl || defaultUrl || row.url || "";
 
     return {
@@ -458,6 +537,10 @@ export class DemoxClient {
       path: row.path || "",
       url: preferredUrl,
       subdomain,
+      subdomainDomain,
+      projectId: row.project_id || row.projectId ? String(row.project_id || row.projectId) : null,
+      projectName: row.project_name || row.projectName || null,
+      projectSlug: row.project_slug || row.projectSlug || null,
       defaultUrl,
       customUrl,
       preferredUrl,
@@ -480,6 +563,24 @@ export class DemoxClient {
 
     const rawWebsites = result.files || result.websites || [];
     return rawWebsites.map((w: any) => this.mapMySQLToCamelCase(w));
+  }
+
+  async listProjects(accessToken: string): Promise<Project[]> {
+    logger.debug("获取项目列表");
+    const result = await this.callApi(
+      "/website/list-projects",
+      { action: "list_projects" },
+      accessToken,
+      this.websiteApiUrl
+    );
+    const rawProjects = result.projects || result.data || [];
+    return rawProjects.map((p: any) => ({
+      id: String(p.id || p._id),
+      name: p.name || "default",
+      slug: p.slug || "default",
+      archived: !!p.archived,
+      websitesCount: Number(p.websitesCount || p.websites_count || 0),
+    }));
   }
 
   /**
@@ -517,11 +618,12 @@ export class DemoxClient {
   async checkSubdomain(
     subdomain: string,
     accessToken: string,
-    websiteId?: string
+    websiteId?: string,
+    domain?: string
   ): Promise<DomainCheckResult> {
     return await this.callApi(
       "/website/check-subdomain",
-      { action: "check_subdomain", subdomain, websiteId },
+      { action: "check_subdomain", subdomain, websiteId, domain },
       accessToken,
       this.websiteApiUrl
     );
@@ -530,11 +632,12 @@ export class DemoxClient {
   async setSubdomain(
     websiteId: string,
     subdomain: string,
-    accessToken: string
+    accessToken: string,
+    domain?: string
   ): Promise<DomainResult> {
     return await this.callApi(
       "/website/set-subdomain",
-      { action: "set_subdomain", websiteId, subdomain },
+      { action: "set_subdomain", websiteId, subdomain, domain },
       accessToken,
       this.websiteApiUrl
     );

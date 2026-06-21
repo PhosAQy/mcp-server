@@ -69,6 +69,10 @@ class DemoxMCPServer {
                   description:
                     "网站 ID（可选）。如果不提供，将创建新网站；如果提供，将更新现有网站",
                 },
+                projectId: {
+                  type: "string",
+                  description: "项目 ID（可选）。不提供时部署到当前用户的 default 项目",
+                },
                 fileName: {
                   type: "string",
                   description: "网站名称，用于标识和展示。如果不提供，会自动使用目录或文件名",
@@ -93,6 +97,15 @@ class DemoxMCPServer {
             },
           },
           {
+            name: "list_projects",
+            description:
+              "获取用户在 Demox 平台上的所有项目列表，包括项目 ID、名称、slug 和站点数量",
+            inputSchema: {
+              type: "object",
+              properties: {},
+            },
+          },
+          {
             name: "get_website",
             description:
               "获取指定网站的详细信息，包括文件列表、部署历史等",
@@ -110,7 +123,7 @@ class DemoxMCPServer {
           {
             name: "check_custom_domain",
             description:
-              "检查自定义子域名前缀是否可用，域名格式为 <subdomain>.demox.site",
+              "检查官方域名子域名前缀是否可用，域名格式为 <subdomain>.<domain>",
             inputSchema: {
               type: "object",
               properties: {
@@ -124,6 +137,11 @@ class DemoxMCPServer {
                   type: "string",
                   description:
                     "当前网站 ID（可选）。传入后，如果该前缀已绑定到自己，也会视为可用",
+                },
+                domain: {
+                  type: "string",
+                  enum: ["demox.site", "vibeme.cn"],
+                  description: "官方域名后缀，默认 demox.site",
                 },
               },
               required: ["subdomain"],
@@ -144,7 +162,12 @@ class DemoxMCPServer {
                   type: "string",
                   minLength: 5,
                   maxLength: 63,
-                  description: "子域名前缀，5-63 位，例如 my-demo，对应 my-demo.demox.site",
+                  description: "子域名前缀，5-63 位，例如 my-demo",
+                },
+                domain: {
+                  type: "string",
+                  enum: ["demox.site", "vibeme.cn"],
+                  description: "官方域名后缀，默认 demox.site",
                 },
               },
               required: ["websiteId", "subdomain"],
@@ -203,6 +226,8 @@ class DemoxMCPServer {
             return await this.handleDeploy(args, accessToken);
           case "list_websites":
             return await this.handleList(accessToken);
+          case "list_projects":
+            return await this.handleListProjects(accessToken);
           case "get_website":
             return await this.handleGet(args, accessToken);
           case "check_custom_domain":
@@ -245,6 +270,8 @@ class DemoxMCPServer {
                 return await this.handleDeploy(args, newAccessToken);
               case "list_websites":
                 return await this.handleList(newAccessToken);
+              case "list_projects":
+                return await this.handleListProjects(newAccessToken);
               case "get_website":
                 return await this.handleGet(args, newAccessToken);
               case "check_custom_domain":
@@ -299,7 +326,7 @@ demox-mcp login
    * 处理网站部署
    */
   private async handleDeploy(args: any, accessToken: string) {
-    const { zipFile, websiteId, fileName: providedFileName, templateId } = args;
+    const { zipFile, websiteId, projectId, fileName: providedFileName, templateId } = args;
 
     // 参数验证
     if (!zipFile) {
@@ -326,6 +353,7 @@ demox-mcp login
         {
           zipFile,
           websiteId,
+          projectId,
           fileName,
           templateId,
         },
@@ -340,7 +368,7 @@ demox-mcp login
 
 **网站名称**: ${fileName}
 **网站 ID**: ${result.websiteId}
-**访问地址**: ${result.url}
+${result.projectId ? `**项目 ID**: ${result.projectId}\n` : ""}**访问地址**: ${result.url}
 ${result.customUrl && result.defaultUrl && result.customUrl !== result.defaultUrl ? `**默认域名**: ${result.defaultUrl}\n` : ""}**部署路径**: ${result.path}
 
 您现在可以访问上述地址查看您的网站了。`,
@@ -379,7 +407,7 @@ ${result.customUrl && result.defaultUrl && result.customUrl !== result.defaultUr
         const date = new Date(site.createdAt).toLocaleString("zh-CN");
         return `${index + 1}. **${site.fileName}**
    - ID: \`${site.websiteId}\`
-   - URL: ${site.url}
+${site.projectName || site.projectId ? `   - 项目: ${site.projectName || site.projectId}\n` : ""}   - URL: ${site.url}
 ${site.customUrl && site.defaultUrl && site.customUrl !== site.defaultUrl ? `   - 默认域名: ${site.defaultUrl}\n` : ""}   - 创建时间: ${date}
 `;
       })
@@ -392,6 +420,45 @@ ${site.customUrl && site.defaultUrl && site.customUrl !== site.defaultUrl ? `   
           text: `📋 您的网站列表（共 ${websites.length} 个）
 
 ${listText}`,
+        },
+      ],
+    };
+  }
+
+  /**
+   * 处理项目列表
+   */
+  private async handleListProjects(accessToken: string) {
+    logger.info("获取项目列表");
+
+    const projects = await this.demoxClient!.listProjects(accessToken);
+
+    if (projects.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "您还没有项目。部署新网站时会自动创建 default 项目。",
+          },
+        ],
+      };
+    }
+
+    const listText = projects
+      .map((project, index) => {
+        return `${index + 1}. **${project.name}**
+   - ID: \`${project.id}\`
+   - Slug: ${project.slug}
+   - 站点数: ${project.websitesCount || 0}
+`;
+      })
+      .join("\n");
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `📁 您的项目列表（共 ${projects.length} 个）\n\n${listText}`,
         },
       ],
     };
@@ -436,7 +503,7 @@ ${listText}`,
 
 **名称**: ${website.fileName}
 **ID**: \`${website.websiteId}\`
-**URL**: ${website.url}
+${website.projectName || website.projectId ? `**项目**: ${website.projectName || website.projectId}\n` : ""}**URL**: ${website.url}
 ${website.customUrl && website.defaultUrl && website.customUrl !== website.defaultUrl ? `**默认域名**: ${website.defaultUrl}\n` : ""}**路径**: ${website.path}
 **创建时间**: ${createdDate}
 **更新时间**: ${updatedDate}`,
@@ -449,7 +516,7 @@ ${website.customUrl && website.defaultUrl && website.customUrl !== website.defau
    * 处理自定义域名可用性检查
    */
   private async handleCheckCustomDomain(args: any, accessToken: string) {
-    const { subdomain, websiteId } = args;
+    const { subdomain, websiteId, domain = "demox.site" } = args;
 
     if (!subdomain) {
       throw new Error("缺少必需参数: subdomain");
@@ -458,9 +525,10 @@ ${website.customUrl && website.defaultUrl && website.customUrl !== website.defau
     const result = await this.demoxClient!.checkSubdomain(
       subdomain,
       accessToken,
-      websiteId
+      websiteId,
+      domain
     );
-    const host = `${subdomain}.demox.site`;
+    const host = `${subdomain}.${result.domain || domain}`;
 
     return {
       content: [
@@ -478,7 +546,7 @@ ${website.customUrl && website.defaultUrl && website.customUrl !== website.defau
    * 处理设置自定义域名
    */
   private async handleSetCustomDomain(args: any, accessToken: string) {
-    const { websiteId, subdomain } = args;
+    const { websiteId, subdomain, domain = "demox.site" } = args;
 
     if (!websiteId) {
       throw new Error("缺少必需参数: websiteId");
@@ -490,7 +558,8 @@ ${website.customUrl && website.defaultUrl && website.customUrl !== website.defau
     const result = await this.demoxClient!.setSubdomain(
       websiteId,
       subdomain,
-      accessToken
+      accessToken,
+      domain
     );
 
     if (!result.success) {
@@ -504,7 +573,7 @@ ${website.customUrl && website.defaultUrl && website.customUrl !== website.defau
           text: `✅ 自定义域名已设置
 
 **网站 ID**: \`${websiteId}\`
-**访问地址**: ${result.url || `https://${subdomain}.demox.site/`}
+**访问地址**: ${result.url || `https://${subdomain}.${result.subdomainDomain || result.subdomain_domain || domain}/`}
 ${result.message ? `**提示**: ${result.message}` : ""}`,
         },
       ],
